@@ -1,0 +1,19 @@
+# Fixture: a domain crate in allowlist mode. It vouches for `serde` only, so
+# every other normal dep must be flagged — `reqwest` by its effect (network),
+# `some-unvetted-lib` as an unvetted dependency. Deps are never resolved
+# (`cargo metadata --no-deps`), so the fake name is fine.
+[workspace]
+
+[package]
+name = "allowlist-domain"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+serde = "1"
+reqwest = "1"
+some-unvetted-lib = "1"
+
+[package.metadata.hex-arch]
+role = "domain"
+pure-deps = ["serde"]

@@ -1,0 +1,12 @@
+# Fixture: a `role = "domain"` crate whose source does not parse. The tool must
+# refuse to call this clean — an unread domain file cannot be vouched for. Own
+# [workspace] table so the parent effect-audit workspace ignores it.
+[workspace]
+
+[package]
+name = "unparseable-domain"
+version = "0.0.0"
+edition = "2021"
+
+[package.metadata.hex-arch]
+role = "domain"

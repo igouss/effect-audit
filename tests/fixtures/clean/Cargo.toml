@@ -1,0 +1,11 @@
+# Fixture: a clean functional-core domain crate. Own [workspace] table so the
+# parent effect-audit workspace ignores it.
+[workspace]
+
+[package]
+name = "clean-domain"
+version = "0.0.0"
+edition = "2021"
+
+[package.metadata.hex-arch]
+role = "domain"

@@ -1,0 +1,10 @@
+# Fixture: a domain crate that leaks a clock read into the core.
+[workspace]
+
+[package]
+name = "dirty-domain"
+version = "0.0.0"
+edition = "2021"
+
+[package.metadata.hex-arch]
+role = "domain"

@@ -1,0 +1,11 @@
+# Fixture: exercises cfg-gated module resolution. A `#[cfg(test)]` submodule
+# must be skipped; a `#[cfg(not(test))]` submodule must be audited.
+[workspace]
+
+[package]
+name = "gated-domain"
+version = "0.0.0"
+edition = "2021"
+
+[package.metadata.hex-arch]
+role = "domain"

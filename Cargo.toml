@@ -1,0 +1,29 @@
+[package]
+name = "effect-audit"
+version = "0.1.0"
+edition = "2021"
+description = "Enforce Bernhardt's functional-core/imperative-shell rule: flag side effects (clocks, RNG, I/O, console, shared mutable state, runtime/DB deps) that leak into hex-arch `role = \"domain\"` crates."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/igouss/effect-audit"
+
+# Self-contained: the empty [workspace] table makes this crate its own
+# cargo workspace root, so it builds with a tiny dep graph (no tokio,
+# no agent stack) and runs fast as a pre-commit gate.
+[workspace]
+
+[dependencies]
+syn = { version = "2", features = ["full", "visit"] }
+quote = "1"
+proc-macro2 = { version = "1", features = ["span-locations"] }
+cargo_metadata = "0.18"
+serde_json = "1"
+anyhow = "1"
+ignore = "0.4"
+
+[dev-dependencies]
+# Executable specs: cucumber parses `features/*.feature` and runs the step
+# definitions in `tests/cucumber.rs`, driven from one ordinary `#[tokio::test]`
+# (no `harness = false`) so `cargo nextest` can list and run it natively.
+# Explicit versions because this crate is its own workspace (no `workspace = true`).
+cucumber = "0.21"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
