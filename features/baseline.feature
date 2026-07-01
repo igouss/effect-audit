@@ -10,3 +10,11 @@ Feature: Baseline ratchet
     When effect-audit runs on "clean" against that baseline
     Then it exits with code 1
     And stderr contains "stale"
+
+  Scenario: A macro-argument finding baselines, and going clean goes stale
+    Given a baseline frozen from the "macroleak" fixture
+    When effect-audit runs on "macroleak" against that baseline
+    Then it exits with code 0
+    When effect-audit runs on "clean" against that baseline
+    Then it exits with code 1
+    And stderr contains "stale"

@@ -1,0 +1,12 @@
+# Fixture: a domain crate that holds a HashMap in its functional core. Its
+# iteration order is nondeterministic, so its presence is flagged only under
+# --strict. Own [workspace] table so the parent effect-audit workspace ignores it.
+[workspace]
+
+[package]
+name = "hashiter-domain"
+version = "0.0.0"
+edition = "2021"
+
+[package.metadata.hex-arch]
+role = "domain"

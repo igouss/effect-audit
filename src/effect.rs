@@ -37,6 +37,10 @@ pub enum EffectKind {
     Database,
     /// Module-level shared mutable state (`static mut`, `static X: Mutex<_>`).
     SharedMutableState,
+    /// A `HashMap`/`HashSet` in the core's surface. Iteration order is
+    /// nondeterministic, so any order that escapes the domain smuggles in
+    /// hash-seed randomness — the same determinism leak by another door.
+    HashIteration,
     /// A normal dependency a domain crate pulled in without vouching for it on
     /// its `pure-deps` allowlist. The effect is unknown — that is the point: the
     /// crate let in something it has not declared pure.
@@ -58,6 +62,7 @@ impl EffectKind {
             EffectKind::Concurrency => "concurrency",
             EffectKind::Database => "database",
             EffectKind::SharedMutableState => "shared-mutable-state",
+            EffectKind::HashIteration => "hash-iteration",
             EffectKind::UnvettedDependency => "unvetted-dependency",
         }
     }
@@ -86,6 +91,10 @@ impl EffectKind {
             EffectKind::Database => "define a repository port; the DB adapter implements it",
             EffectKind::SharedMutableState => {
                 "thread state through arguments and return values instead"
+            }
+            EffectKind::HashIteration => {
+                "use BTreeMap/BTreeSet/IndexMap in the core, or fc-allow with a reason \
+                 explaining why order cannot escape."
             }
             EffectKind::UnvettedDependency => {
                 "add it to [package.metadata.hex-arch] pure-deps if it is a pure-value crate, \
@@ -181,6 +190,41 @@ pub fn classify_macro(name: &str) -> Option<EffectKind> {
     }
 }
 
+/// Whether a macro evaluates its argument expressions call-by-value, so an
+/// effect written inside those arguments (`format!("{}", SystemTime::now())`)
+/// is a real call at runtime and worth scanning.
+///
+/// This is a *fixed, hardcoded* allowlist of std macros only — the same
+/// philosophy as the effectful-crate table: scanning every macro's tokens would
+/// fabricate a violation for macros like `stringify!`/`cfg!`/`concat!` that
+/// quote or discard their input without evaluating it. `dbg!` is deliberately
+/// excluded: it already fires as a `console-io` finding via [`classify_macro`],
+/// and its argument stays opaque like every other non-listed macro.
+pub fn evaluates_arguments(name: &str) -> bool {
+    matches!(
+        name,
+        "format"
+            | "print"
+            | "println"
+            | "eprint"
+            | "eprintln"
+            | "write"
+            | "writeln"
+            | "format_args"
+            | "vec"
+            | "assert"
+            | "assert_eq"
+            | "assert_ne"
+            | "debug_assert"
+            | "debug_assert_eq"
+            | "debug_assert_ne"
+            | "panic"
+            | "todo"
+            | "unimplemented"
+            | "matches"
+    )
+}
+
 /// Whether a single type identifier names interior mutability. Matched as a
 /// *whole* identifier — not a substring — so `Cellophane` does not trip `Cell`
 /// and `LazyThing` does not trip `Lazy`. `Atomic*` is a prefix because the std
@@ -197,6 +241,16 @@ pub fn is_interior_mutability_ident(ident: &str) -> bool {
         "Lazy",
     ];
     ident.starts_with("Atomic") || EXACT.contains(&ident)
+}
+
+/// Whether a single type identifier names a hash-ordered collection whose
+/// iteration order is nondeterministic. Matched as a *whole* identifier — not a
+/// substring — so a domain's own `HashMapper` does not trip `HashMap` and the
+/// bare string `"HashMap"` is never mistaken for the type. Covers both
+/// `std::collections` and `hashbrown`, because after import each is spelled by
+/// this leaf ident.
+pub fn is_hash_type(ident: &str) -> bool {
+    matches!(ident, "HashMap" | "HashSet")
 }
 
 /// Classify a path expression by its segment idents (e.g. `["SystemTime",
@@ -544,6 +598,25 @@ mod tests {
     }
 
     #[test]
+    fn evaluated_argument_macros_are_recognised() {
+        // one, then many: `format!` and `matches!` evaluate their arguments.
+        assert!(evaluates_arguments("format"));
+        assert!(evaluates_arguments("matches"));
+    }
+
+    #[test]
+    fn quoting_and_unknown_macros_do_not_evaluate_arguments() {
+        // zero: `stringify!`/`cfg!`/`concat!` quote or discard their input;
+        // `dbg!` stays opaque (it fires as console-io via `classify_macro`);
+        // `json!` is a proc-macro off the list.
+        assert!(!evaluates_arguments("stringify"));
+        assert!(!evaluates_arguments("cfg"));
+        assert!(!evaluates_arguments("concat"));
+        assert!(!evaluates_arguments("dbg"));
+        assert!(!evaluates_arguments("json"));
+    }
+
+    #[test]
     fn time_crate_now_utc_and_now_local_are_clocks() {
         // The `time` crate spells it `now_utc`, not `now` (probe P4).
         assert_eq!(
@@ -581,6 +654,22 @@ mod tests {
         assert!(!is_interior_mutability_ident("Cellophane"));
         assert!(!is_interior_mutability_ident("LazyThing"));
         assert!(!is_interior_mutability_ident("u32"));
+    }
+
+    #[test]
+    fn hash_types_are_matched_by_whole_identifier() {
+        // one, then many: the two hash-ordered collections both land.
+        assert!(is_hash_type("HashMap"));
+        assert!(is_hash_type("HashSet"));
+    }
+
+    #[test]
+    fn a_type_that_merely_contains_hashmap_is_not_a_hash_type() {
+        // zero: a domain's own `HashMapper`, a `Cell` lookalike, and a scalar
+        // are never hash collections — whole-ident match, not substring.
+        assert!(!is_hash_type("HashMapper"));
+        assert!(!is_hash_type("Cellophane"));
+        assert!(!is_hash_type("u32"));
     }
 
     #[test]

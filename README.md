@@ -68,6 +68,8 @@ rule. Run both.
 | Clock / RNG / I/O *call sites* in the core | ❌ | ❌ | 👁️ | ✅ |
 | Effectful *dependencies* (`tokio`, `sqlx`, `reqwest`) | ❌ | ❌ | 👁️ | ✅ |
 | Shared mutable state (`static Mutex`, `thread_local!`) | ❌ | ❌ | 👁️ | ✅ |
+| Effects inside *evaluated* macro args (`format!("{}", now())`) | ❌ | ❌ | 👁️ | ✅ |
+| `HashMap`/`HashSet` iteration-order surface in the core (`--strict`) | ❌ | ❌ | 👁️ | ✅ |
 | Allowlist that **compounds** (new effectful crates auto-flagged) | — | ❌ | ❌ | ✅ |
 | Structural match, never `str::contains` | — | ✅ | — | ✅ |
 | Baseline ratchet for incremental adoption | ❌ | ~ | — | ✅ |
@@ -143,9 +145,10 @@ perpetual whack-a-mole against the ecosystem. An allowlist flags every new
 effectful crate the day it's added, with zero taxonomy upkeep.
 
 **4. Sound by omission — it never invents a violation.** When the tool can't see
-something (an effect buried in macro arguments), it stays silent rather than
-guessing. False reds waste your time; this tool would rather miss than lie. The
-gaps are documented under [Limitations](#limitations), not hidden.
+something (an effect buried in a proc-macro's opaque token stream, or in the
+arguments of a macro that quotes rather than evaluates them), it stays silent
+rather than guessing. False reds waste your time; this tool would rather miss
+than lie. The gaps are documented under [Limitations](#limitations), not hidden.
 
 **5. The escape hatch must say why.** A suppression with no rationale is just a
 silent hole. `// fc-allow:` *requires* a non-empty reason or it's ignored.
@@ -172,11 +175,18 @@ business policing anyone else.
 | `concurrency` | `std::thread::{spawn, scope, sleep}` |
 | `database` | a `sqlx` / `rusqlite` / `redis` / `deadpool-*` dependency or path |
 | `shared-mutable-state` | `static mut`, `static X: Mutex<_>` / `Atomic*` / `OnceCell`, `thread_local!`, `lazy_static!` |
+| `hash-iteration` | `HashMap` / `HashSet` in the core's surface — imports, constructors (`HashMap::new`), and type positions (`&HashMap<..>` params, fields, return types), across `std::collections` and `hashbrown` (**`--strict`**; witnesses presence, not a proven order leak) |
 | `unvetted-dependency` | a normal dep not on a crate's `pure-deps` allowlist (allowlist mode only) |
 
 It checks two layers: **manifest** (the dependency policy) and **source** (the
 call sites). The crate matcher knows families by prefix (`aws-sdk-…`,
 `deadpool…`), not just exact names.
+
+Any of these effects is also caught inside the **evaluated arguments** of an
+allowlisted std macro (`format!`, `println!`, `vec!`, `assert_eq!`, …): a clock
+read in `format!("{}", SystemTime::now())` is a real runtime call, so it is
+flagged as a `clock` with its true line number. Macros that quote rather than
+evaluate their input (`stringify!`) and proc-macros stay opaque — see the FAQ.
 
 ### The dependency allowlist (`pure-deps`) — the polarity flip
 
@@ -244,7 +254,7 @@ the production impl and **is** audited. A module gated `#[cfg(any(test, feature
 an explicit `fc-allow` or a baseline entry; the tool will not infer "test" from
 a feature or module *name* (that heuristic is both over- and under-inclusive).
 
-### `--strict` adds two opt-in checks
+### `--strict` adds three opt-in checks
 
 - **Effectful optional deps.** Without `--strict`, a feature-gated (`optional`)
   dep is off in the default build and skipped; with it, an `optional` `reqwest`
@@ -252,6 +262,26 @@ a feature or module *name* (that heuristic is both over- and under-inclusive).
 - **`async` in the core.** `async fn` and `async { }` blocks are effect-shaped —
   they thread a runtime and suspension points through code that should be pure —
   even with no `tokio` dependency. Low confidence, hence opt-in.
+- **`HashMap` / `HashSet` in the core.** The default hasher is seeded from the
+  RNG at startup, so any iteration order that escapes the domain smuggles in that
+  seed — the same determinism leak as a clock read, by another door. Under
+  `--strict` the tool flags the type's *presence* in the core's surface: imports,
+  constructors (`HashMap::new`), and type positions (`&HashMap<..>` parameters,
+  fields, return types), across both `std::collections` and `hashbrown` (after
+  import each is spelled by the same leaf ident). `.iter()` / `.keys()` calls are
+  deliberately **not** flagged — a name-only heuristic there would be far too
+  noisy.
+
+  **Why opt-in — presence is witnessed, harm is approximated.** A hash-iteration
+  finding **witnesses the type's presence**, a fact the parser reads straight off
+  the AST — it is never fabricated. The *harm* — a nondeterministic order
+  actually escaping the domain — is a conservative **over-approximation**: some
+  flagged uses never let order leak. Presence is certain; the leak is inferred,
+  so the check lives here beside `async`, and `fc-allow` / the baseline are its
+  pressure valves. **Holding a `HashMap` passed in from the shell is still a
+  presence finding** — the type is in the core's surface, and that call is
+  deliberate and conservative. The fix is `BTreeMap` / `BTreeSet` / `IndexMap` in
+  the core, or an `fc-allow` whose reason explains why order can never escape.
 
 ---
 
@@ -263,7 +293,8 @@ effect-audit [OPTIONS] [ROOT]
   ROOT                A path inside the workspace to audit (default: cwd).
 
   --advisory          print findings but always exit 0 (warn-only hook)
-  --strict            also flag effectful optional deps and `async` in the core
+  --strict            also flag effectful optional deps, `async`, and
+                      HashMap/HashSet use in the core
   --require-domain    exit 2 if no role="domain" crate is found (anti false-green)
   --skip-unparseable  tolerate a domain file `syn` cannot parse instead of
                       exiting 2; still withholds the clean verdict (anti false-green)
@@ -437,7 +468,7 @@ comment a human wrote, not data the program carries.
 | **`no role = "domain" crate found; audited nothing`** | The run dir has no domain crate, or the metadata key is typo'd. Check `[package.metadata.hex-arch] role = "domain"` and that `ROOT` points inside the workspace. With `--require-domain` this is exit 2, not a silent green. |
 | **CI exits `2`, not `0`/`1`** | That's a *tool* error, not a violation — a bad flag, an unreadable path, an unparseable domain file, or `--require-domain` with no domain crate. Read stderr; don't treat it as "found leaks." |
 | **`cannot parse domain file …` → exit 2** | A `role = "domain"` file `syn` could not parse. The tool will not call a crate clean while a domain file in it is unread. Fix the syntax, or — if it's valid nightly syntax `syn` hasn't caught up to — pass `--skip-unparseable` to record it as skipped (the clean verdict is still withheld and the file is named on stderr). |
-| **A clock/RNG call in a `format!("{}", SystemTime::now())` isn't flagged** | Macro token streams are opaque to the parser — sound by omission. Pull the call out of the macro, or accept it; the tool won't guess inside a macro. |
+| **A clock/RNG call inside a macro — flagged or not?** | Effects inside the *evaluated* arguments of an allowlisted std macro (`format!`, `println!`, `vec!`, the `assert*!` family, `matches!`, …) **are** flagged — `format!("{}", SystemTime::now())` reports a `clock` at its real line. Arguments of a non-allowlisted macro or any proc-macro stay opaque (sound by omission); pull the call out, or `fc-allow` a deliberate one. |
 | **My `test_support/` / fixture code got flagged** | It's not `#[cfg(test)]`-gated, so it's part of the production build and *is* audited (see "feature-gated ≠ test-only"). Gate it with `#[cfg(test)]`, move it to `tests/`, or add an `fc-allow` / baseline entry. |
 | **One `use std::fs;` import shows up as two findings** | Deliberate: the import line and the call site each keep their own clickable location. Deduping by `(file, kind)` would lose that precision — and would lose glob imports (`use std::fs::*`) entirely, since their calls have no qualified site to flag. |
 | **My `pure-deps` allowlist is being ignored** | A malformed `pure-deps` (present but not an array of strings) is treated as *absent* — the crate falls back to legacy denylist mode rather than erroring. Keep it a plain TOML string array; non-string elements are dropped. |
@@ -452,10 +483,19 @@ prove different things. The arrow checker proves *dependencies* point inward; th
 *effects* stay out. A crate can pass the first and fail the second — `SystemTime::now()`
 adds no dependency edge. Run both; they're two halves of one rule.
 
-**Does it catch effects inside macros?** No — macro argument token streams are
-opaque. `thread_local!` and `lazy_static!` are handled as special cases, but a
-clock read buried in `format!(...)` is not seen. Sound by omission: it would
-rather miss than fabricate.
+**Does it catch effects inside macros?** For a fixed allowlist of std macros that
+**evaluate** their arguments — `format!`, `print!` / `println!`, `eprint!` /
+`eprintln!`, `write!` / `writeln!`, `format_args!`, `vec!`, the `assert*!` /
+`debug_assert*!` family, `panic!` / `todo!` / `unimplemented!`, and `matches!` —
+yes. Their argument expressions are real runtime calls, so a clock read in
+`format!("{}", SystemTime::now())` is flagged as a `clock`, with its true line
+number, and nothing is fabricated. Everything else stays opaque: a proc-macro
+(`json!`, `sqlx::query!`) and any macro off the allowlist keep their token
+streams sealed, and a quoting macro like `stringify!(SystemTime::now())` never
+evaluates its argument — flagging *that* would fabricate a call that never
+happens, so we don't. On any parse failure the whole macro is skipped wholesale
+rather than half-scanned. `thread_local!` and `lazy_static!` remain special-cased
+for shared state.
 
 **Why isn't `chrono` / `uuid` / `rand` a banned dependency?** Because a
 `DateTime` value, a `Uuid` value, or a seed *passed into* the core is pure data
@@ -469,13 +509,21 @@ mutability, `thread_local!` — smuggles in nondeterminism, and that's what's
 flagged.
 
 **Is it sound or complete?** Sound, not complete. It errs toward missing a
-violation (effects in macro args, an exotic effectful leaf of `net`/`env`/
-`process` not in the enumerated set) over inventing one — pure value types are
-never flagged. The one residual false-positive risk is the *name-based call-site
-heuristics*: `thread_rng()` and `.elapsed()` are flagged on the name alone, so a
-domain-local `fn elapsed()` or a `thread_rng` that genuinely is pure would trip
-once. Those names are distinctive enough that the trade buys real recall, and
-`fc-allow` / a baseline silences the rare collision. The known gaps are listed
+violation (an effect in a *non-allowlisted* macro's arguments, an exotic
+effectful leaf of `net`/`env`/`process` not in the enumerated set) over inventing
+one — pure value types are never flagged. Two deliberate choices trade a little
+precision for recall, each with an escape hatch:
+
+- *Name-based call-site heuristics.* `thread_rng()` and `.elapsed()` are flagged
+  on the name alone, so a domain-local `fn elapsed()` or a `thread_rng` that
+  genuinely is pure would trip once. Those names are distinctive enough that the
+  trade buys real recall.
+- *`HashMap` / `HashSet` presence (`--strict`).* A hash-iteration finding
+  witnesses the type's **presence** — a fact, never fabricated — but the **harm**
+  (an order actually escaping the domain) is a conservative over-approximation,
+  so a hash collection whose order never leaks is still flagged.
+
+`fc-allow` / a baseline silences either collision. The known gaps are listed
 below.
 
 **Can I run it on a repo that isn't hex-arch?** It only audits crates marked
@@ -494,22 +542,25 @@ rewrite. The tool points; you decide where the seam goes.
 Honest about what it can't see (all **sound by omission** — silence, never a
 fabricated violation):
 
-- A clock/RNG call buried inside *macro arguments* (`format!("{}",
-  SystemTime::now())`) is not seen — macro token streams are opaque.
-  `thread_local!` / `lazy_static!` are handled as special cases.
+- Effects inside a **non-allowlisted macro or a proc-macro** remain invisible.
+  The tool scans the *evaluated* arguments of a fixed allowlist of std macros
+  (`format!`, `println!`, `vec!`, the `assert*!` family, `matches!`, …), so
+  `format!("{}", SystemTime::now())` **is** now flagged — but a proc-macro
+  (`json!`, `sqlx::query!`) keeps its token stream sealed, and a macro that
+  quotes rather than evaluates its input (`stringify!`) is left alone precisely so
+  the tool never fabricates a call that never happens. `thread_local!` /
+  `lazy_static!` stay special-cased for shared state.
+- A **`HashMap` / `HashSet` finding witnesses presence, not a proven leak.** Under
+  `--strict` the type's presence in the core's surface is flagged (a fact read off
+  the AST), but whether a nondeterministic order actually escapes the domain is a
+  conservative over-approximation — a held-and-never-iterated map is still
+  reported. Deliberate; `fc-allow` / a baseline is the valve.
 - Effects through an aliased *method* call (`x.now()` where `x`'s type is
   unknown) are not resolved; the qualified form `T::now()` and a `use T as A`
   type alias are. The one method caught by name is `.elapsed()` — distinctive
   enough to flag without knowing the receiver type (the same call it makes that
   `Instant::now()` does). `.duration_since(other)` is *not* flagged: it subtracts
   two values you already hold and reads no clock.
-- **`HashMap` / `HashSet` iteration order is not flagged.** The default hasher is
-  seeded from the RNG at startup, so producing output from the iteration order of
-  one is nondeterministic — a genuine functional-core leak this tool does not yet
-  catch (it needs binding/type tracking a purely syntactic scan can't do soundly,
-  and a name-only heuristic on `.iter()`/`.keys()` would be far too noisy). Until
-  then: reach for `BTreeMap` / `IndexMap` in the core when iteration order escapes.
-  A candidate for a future `--strict` check.
 - `#[path = "…"]` modules are resolved for test-gating exclusion, but deeply
   relocated submodule trees may not be followed exhaustively.
 - One logical leak imported and then called (`use std::fs;` *and* `fs::read(…)`)

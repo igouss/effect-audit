@@ -35,7 +35,8 @@ ARGS:
 
 OPTIONS:
     --advisory          Print findings but always exit 0 (warn-only hook).
-    --strict            Also flag effectful optional deps and `async` in the core.
+    --strict            Also flag effectful optional deps, `async` in the core,
+                        and HashMap/HashSet use in the core.
     --require-domain    Fail (exit 2) if no `role = \"domain\"` crate is found,
                         instead of passing green having audited nothing.
     --skip-unparseable  Tolerate a domain file `syn` cannot parse (record it as
@@ -100,6 +101,7 @@ fn run() -> Result<ExitCode> {
     let config: AuditConfig = AuditConfig {
         scan: ScanConfig {
             flag_async: args.strict,
+            flag_hash: args.strict,
         },
         skip_unparseable: args.skip_unparseable,
     };
@@ -300,5 +302,39 @@ fn parse_format(value: Option<&String>) -> Result<Format> {
         Some("json") => Ok(Format::Json),
         Some(other) => bail!("unknown format: {other} (expected `human` or `json`)"),
         None => bail!("--format requires a value (`human` or `json`)"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HELP;
+
+    /// The `--strict` help entry must name every check `--strict` turns on, so a
+    /// silently-added or -renamed check can never drift out of the documented
+    /// contract. Guards the third check (`HashMap`/`HashSet`) wired in this bead.
+    #[test]
+    fn help_strict_names_the_hash_iteration_check() {
+        assert!(
+            HELP.contains("HashMap"),
+            "--strict help must name HashMap: {HELP}"
+        );
+        assert!(
+            HELP.contains("HashSet"),
+            "--strict help must name HashSet: {HELP}"
+        );
+    }
+
+    /// The two long-standing `--strict` checks must stay named too, so widening
+    /// the entry for the hash check did not drop the async / optional-dep prose.
+    #[test]
+    fn help_strict_still_names_the_original_checks() {
+        assert!(
+            HELP.contains("async"),
+            "--strict help must still name async: {HELP}"
+        );
+        assert!(
+            HELP.contains("optional deps"),
+            "--strict help must still name optional deps: {HELP}"
+        );
     }
 }

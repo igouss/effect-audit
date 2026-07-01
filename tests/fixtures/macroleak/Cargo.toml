@@ -1,0 +1,13 @@
+# Fixture: a domain crate that reads the clock inside an evaluated macro
+# argument (`format!("{}", SystemTime::now())`). The macro-argument scan is on by
+# default, so this fails without --strict. Own [workspace] table so the parent
+# effect-audit workspace ignores it.
+[workspace]
+
+[package]
+name = "macroleak-domain"
+version = "0.0.0"
+edition = "2021"
+
+[package.metadata.hex-arch]
+role = "domain"

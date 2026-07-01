@@ -6,3 +6,7 @@ Feature: The tool obeys its own rule
   Scenario: effect-audit's own functional core is effect-free
     When the tool audits its own functional core
     Then no effects are reported
+
+  Scenario: effect-audit's own functional core holds under strict too
+    When the tool audits its own functional core in strict mode
+    Then no effects are reported

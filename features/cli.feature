@@ -14,6 +14,20 @@ Feature: Command-line contract
     Then it exits with code 1
     And stderr contains "clock"
 
+  Scenario: A HashMap in the core passes by default but fails under strict
+    Given the "hashiter" fixture workspace
+    When effect-audit runs
+    Then it exits with code 0
+    When effect-audit runs with "--strict"
+    Then it exits with code 1
+    And stderr contains "hash-iteration"
+
+  Scenario: A clock inside format! in the core fails by default
+    Given the "macroleak" fixture workspace
+    When effect-audit runs
+    Then it exits with code 1
+    And stderr contains "clock"
+
   Scenario: A root-level crate renders a clean src path
     Given the "dirty" fixture workspace
     When effect-audit runs

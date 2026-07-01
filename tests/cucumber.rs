@@ -114,7 +114,13 @@ fn when_audited(world: &mut AuditWorld) {
 
 #[when("the source is audited in strict mode")]
 fn when_audited_strict(world: &mut AuditWorld) {
-    audit_source(world, ScanConfig { flag_async: true });
+    audit_source(
+        world,
+        ScanConfig {
+            flag_async: true,
+            flag_hash: true,
+        },
+    );
 }
 
 #[when("effect-audit runs")]
@@ -152,10 +158,10 @@ fn when_runs_against_baseline(world: &mut AuditWorld, name: String) {
     world.stderr = stderr;
 }
 
-#[when("the tool audits its own functional core")]
-fn when_dogfood(world: &mut AuditWorld) {
-    // The pure core only — the shell (discovery/modtree/audit/main/baseline)
-    // legitimately performs I/O and is excluded by construction.
+/// Audit the tool's own pure core with the given knobs, storing the findings.
+/// The pure core only — the shell (discovery/modtree/audit/main/baseline)
+/// legitimately performs I/O and is excluded by construction.
+fn dogfood_core(world: &mut AuditWorld, config: ScanConfig) {
     const CORE: &[&str] = &[
         "effect.rs",
         "cfg_pred.rs",
@@ -172,8 +178,28 @@ fn when_dogfood(world: &mut AuditWorld) {
         let parsed: syn::File = syn::parse_file(&source).expect("core file parses");
         world
             .findings
-            .extend(scan_file(&parsed, file, &source, ScanConfig::default()));
+            .extend(scan_file(&parsed, file, &source, config));
     }
+}
+
+#[when("the tool audits its own functional core")]
+fn when_dogfood(world: &mut AuditWorld) {
+    dogfood_core(world, ScanConfig::default());
+}
+
+#[when("the tool audits its own functional core in strict mode")]
+fn when_dogfood_strict(world: &mut AuditWorld) {
+    // Both --strict knobs on: the core stays effect-free even when async and
+    // hash-collection presence are also policed. `effect.rs` literally holds the
+    // strings "HashMap"/"HashSet" and the allowlisted-macro names as string
+    // literals, so a green run here is a built-in proof the match is structural.
+    dogfood_core(
+        world,
+        ScanConfig {
+            flag_async: true,
+            flag_hash: true,
+        },
+    );
 }
 
 // ─── Then ────────────────────────────────────────────────────────────
