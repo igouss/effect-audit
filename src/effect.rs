@@ -45,6 +45,22 @@ pub enum EffectKind {
     /// its `pure-deps` allowlist. The effect is unknown — that is the point: the
     /// crate let in something it has not declared pure.
     UnvettedDependency,
+    /// `#[async_trait]` in the core, or a dependency on the macro that
+    /// provides it.
+    ///
+    /// The macro rewrites every `async fn` in a trait into one returning
+    /// `Pin<Box<dyn Future + Send>>`, so the allocation is *mandated* — on
+    /// every impl and every caller, whether or not that trait is ever held
+    /// erased. That is the effect: not the box itself, but the loss of the
+    /// choice, plus a 0.x proc-macro sitting in the layer whose whole value
+    /// proposition is stability.
+    ///
+    /// Deliberately narrow. A domain crate that spells the boxed future in
+    /// its own trait is *not* flagged: for a port held as `Arc<dyn Port>`
+    /// the box exists either way, and forbidding it would be
+    /// allocation-purity wearing an effect-purity costume. This rule
+    /// targets the mandate, not the allocation.
+    MandatedBoxing,
 }
 
 impl EffectKind {
@@ -64,6 +80,7 @@ impl EffectKind {
             EffectKind::SharedMutableState => "shared-mutable-state",
             EffectKind::HashIteration => "hash-iteration",
             EffectKind::UnvettedDependency => "unvetted-dependency",
+            EffectKind::MandatedBoxing => "mandated-boxing",
         }
     }
 
@@ -99,6 +116,13 @@ impl EffectKind {
             EffectKind::UnvettedDependency => {
                 "add it to [package.metadata.hex-arch] pure-deps if it is a pure-value crate, \
                  otherwise move its use behind a port"
+            }
+            EffectKind::MandatedBoxing => {
+                "spell the future in the trait yourself — `fn f(&self) -> \
+                 Pin<Box<dyn Future<Output = T> + Send + '_>>` — so the box is a choice the \
+                 port makes, not one \
+                 a macro makes for it; impls return `Box::pin(async move { .. })`. Where the \
+                 trait is never held as `dyn`, native `async fn` in traits needs no macro at all."
             }
         }
     }
@@ -157,6 +181,9 @@ fn effectful_crate_exact(name: &str) -> Option<EffectKind> {
         "tokio" | "async-std" | "async_std" | "smol" | "async-global-executor" => {
             Some(EffectKind::AsyncRuntime)
         }
+        // Not a runtime: a proc-macro that mandates a boxed future on every
+        // trait method it touches. Distinct effect, distinct fix.
+        "async-trait" | "async_trait" => Some(EffectKind::MandatedBoxing),
         "sqlx" | "rusqlite" | "diesel" | "sea-orm" | "sea_orm" | "redis" | "mongodb"
         | "postgres" | "tokio-postgres" | "mysql" | "mysql_async" | "sled" | "r2d2" => {
             Some(EffectKind::Database)

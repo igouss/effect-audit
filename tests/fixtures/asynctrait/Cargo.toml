@@ -1,0 +1,16 @@
+# Fixture: a domain crate that depends on async-trait. The dependency alone is
+# the finding — no source in this crate uses the macro, which is the point: the
+# manifest edge is enough, so a crate cannot carry the proc-macro "for later".
+# Own [workspace] table so the parent effect-audit workspace ignores it.
+[workspace]
+
+[package]
+name = "asynctrait-domain"
+version = "0.0.0"
+edition = "2021"
+
+[package.metadata.hex-arch]
+role = "domain"
+
+[dependencies]
+async-trait = "0.1"

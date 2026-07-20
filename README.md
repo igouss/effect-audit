@@ -177,6 +177,7 @@ business policing anyone else.
 | `shared-mutable-state` | `static mut`, `static X: Mutex<_>` / `Atomic*` / `OnceCell`, `thread_local!`, `lazy_static!` |
 | `hash-iteration` | `HashMap` / `HashSet` in the core's surface — imports, constructors (`HashMap::new`), and type positions (`&HashMap<..>` params, fields, return types), across `std::collections` and `hashbrown` (**`--strict`**; witnesses presence, not a proven order leak) |
 | `unvetted-dependency` | a normal dep not on a crate's `pure-deps` allowlist (allowlist mode only) |
+| `mandated-boxing` | an `async-trait` dependency, a `use async_trait::async_trait`, or an `#[async_trait]` / `#[async_trait::async_trait]` attribute. The macro rewrites every `async fn` in a trait to return `Pin<Box<dyn Future + Send>>`, so the allocation is mandated on every impl and every caller. **A boxed future you spell yourself is not a finding** — for a port held as `Arc<dyn Port>` the box exists either way. The rule targets the mandate, not the allocation |
 
 It checks two layers: **manifest** (the dependency policy) and **source** (the
 call sites). The crate matcher knows families by prefix (`aws-sdk-…`,

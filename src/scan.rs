@@ -154,8 +154,20 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
     /// Method-level gating (a `#[cfg(test)] fn` inside a non-test `impl`) is a
     /// different scope and stays in `visit_impl_item_fn`.
     fn visit_item(&mut self, node: &'ast Item) {
-        if cfg_pred::is_test_only(item_attrs(node)) {
+        let attrs: &[Attribute] = item_attrs(node);
+        if cfg_pred::is_test_only(attrs) {
             return;
+        }
+        // Riding the same chokepoint as the test gate: `#[async_trait]` is
+        // only ever legal on a trait or an impl, and both arrive here.
+        for attr in attrs {
+            if let Some(line) = async_trait_attr_line(attr) {
+                self.record(
+                    EffectKind::MandatedBoxing,
+                    line,
+                    "#[async_trait]".to_owned(),
+                );
+            }
         }
         visit::visit_item(self, node);
     }
@@ -334,6 +346,18 @@ fn item_attrs(item: &Item) -> &[Attribute] {
         Item::Use(i) => &i.attrs,
         _ => &[],
     }
+}
+
+/// The line of an `#[async_trait]` attribute, or `None` for anything else.
+///
+/// Matches on the *last* path segment so both the imported spelling
+/// (`#[async_trait]`) and the fully-qualified one (`#[async_trait::async_trait]`)
+/// are caught — a crate can use the macro without ever writing a `use`, so
+/// keying on the import would miss it. Comparison is against the whole segment
+/// ident, never a substring, so a user's own `#[async_trait_ext]` is untouched.
+fn async_trait_attr_line(attr: &Attribute) -> Option<usize> {
+    let last: &syn::PathSegment = attr.path().segments.last()?;
+    (last.ident == "async_trait").then(|| attr.span().start().line)
 }
 
 /// Whether any identifier token in a stream names interior mutability. Token
