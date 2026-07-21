@@ -21,8 +21,8 @@ use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
-    Attribute, Expr, ExprAsync, ExprMethodCall, ExprPath, ImplItemFn, Item, ItemFn, ItemStatic,
-    ItemUse, Macro, StaticMutability, Token, TypePath, UseTree,
+    Attribute, Expr, ExprAsync, ExprMethodCall, ExprPath, Field, ImplItemFn, Item, ItemFn,
+    ItemStatic, ItemUse, Macro, StaticMutability, Token, TypePath, UseTree,
 };
 
 use crate::effect::{self, EffectKind};
@@ -300,6 +300,35 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
             }
         }
         visit::visit_macro(self, node);
+    }
+
+    /// A struct or enum-variant field whose type names interior mutability.
+    ///
+    /// This is the shape interior mutability actually takes: a recording sink
+    /// threaded through a fake, a memo hung off a struct, a counter shared by
+    /// clones. The `static` visitor below matches the rarer shape. One field is
+    /// one witness — `use std::sync::Mutex` is not itself classified, so the
+    /// field is the only place the fact appears.
+    ///
+    /// Unconditional, like the `static` rule: the type either names interior
+    /// mutability or it does not, so there is no heuristic for `--strict` to
+    /// add pressure to. A `OnceLock` memoising a pure value therefore reports
+    /// the same as an `Arc<Mutex<Vec<Call>>>` recording sink; only the author
+    /// knows which they wrote, so `fc-allow` carries that distinction.
+    fn visit_field(&mut self, node: &'ast Field) {
+        if tokens_name_interior_mutability(&node.ty.to_token_stream()) {
+            let line: usize = node.span().start().line;
+            let label: String = node
+                .ident
+                .as_ref()
+                .map_or_else(|| "field".to_owned(), ToString::to_string);
+            self.record(
+                EffectKind::SharedMutableState,
+                line,
+                format!("field {label}"),
+            );
+        }
+        visit::visit_field(self, node);
     }
 
     fn visit_item_static(&mut self, node: &'ast ItemStatic) {
