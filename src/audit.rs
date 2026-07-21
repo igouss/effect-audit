@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use ignore::WalkBuilder;
 
-use crate::discovery::DomainCrate;
+use crate::discovery::{CoreCrate, Role};
 use crate::effect::{self, EffectKind};
 use crate::finding::Finding;
 use crate::modtree;
@@ -41,24 +41,31 @@ pub struct AuditOutcome {
 }
 
 /// Audit every domain crate: manifest deps plus source files.
-pub fn audit(crates: &[DomainCrate], config: AuditConfig) -> Result<AuditOutcome> {
+pub fn audit(crates: &[CoreCrate], config: AuditConfig) -> Result<AuditOutcome> {
+    let kernels: BTreeSet<&str> = kernel_names(crates);
     let mut outcome: AuditOutcome = AuditOutcome::default();
     for domain in crates {
-        outcome.findings.extend(manifest_findings(domain));
+        outcome.findings.extend(manifest_findings(domain, &kernels));
         source_findings(domain, config, &mut outcome)?;
     }
     Ok(outcome)
 }
 
-/// Turn a domain crate's dependencies into manifest-level findings, applying the
-/// crate's allowlist (or the legacy denylist) via the pure classifier.
-pub fn manifest_findings(domain: &DomainCrate) -> Vec<Finding> {
+/// Turn a core crate's dependencies into manifest-level findings.
+///
+/// A domain crate is judged by its allowlist (or the legacy denylist). A kernel
+/// crate is judged by a stricter rule that takes no allowlist at all: every
+/// normal dependency is a finding, named by its effect where the taxonomy knows
+/// one and as an unvetted dependency otherwise. A `pure-deps` list on a kernel
+/// crate is therefore inert — [`crate::discovery::CoreCrate::vouches_in_vain`]
+/// is what says so out loud.
+pub fn manifest_findings(domain: &CoreCrate, kernels: &BTreeSet<&str>) -> Vec<Finding> {
     let pure_deps: Option<&[String]> = domain.pure_deps.as_deref();
     domain
         .deps
         .iter()
         .filter_map(|name: &String| {
-            effect::classify_dependency(name, pure_deps).map(|kind: EffectKind| Finding {
+            classify(domain.role, name, pure_deps, kernels).map(|kind: EffectKind| Finding {
                 kind,
                 file: domain.manifest_rel.clone(),
                 line: 0,
@@ -68,11 +75,39 @@ pub fn manifest_findings(domain: &DomainCrate) -> Vec<Finding> {
         .collect()
 }
 
+/// The dependency policy for one role: the kernel tolerates nothing, the domain
+/// tolerates what it vouches for.
+fn classify(
+    role: Role,
+    name: &str,
+    pure_deps: Option<&[String]>,
+    kernels: &BTreeSet<&str>,
+) -> Option<EffectKind> {
+    match role {
+        // The kernel layer is closed under itself: another kernel crate in the
+        // same workspace is the one dependency that carries no new surface.
+        // This is the same line hex-lint's role matrix draws, and the two gates
+        // disagreeing about the floor of the system would be its own defect.
+        Role::Kernel if kernels.contains(name) => None,
+        Role::Kernel => Some(effect::unvetted_or_known(name)),
+        Role::Domain => effect::classify_dependency(name, pure_deps),
+    }
+}
+
+/// The names of every `role = "kernel"` crate in the workspace.
+fn kernel_names(crates: &[CoreCrate]) -> BTreeSet<&str> {
+    crates
+        .iter()
+        .filter(|c: &&CoreCrate| c.role == Role::Kernel)
+        .map(|c: &CoreCrate| c.name.as_str())
+        .collect()
+}
+
 /// Scan every production `.rs` file under a domain crate's `src/` directory,
 /// skipping files reachable only through a test-gated module. Findings and any
 /// tolerated-skip notices are accumulated into `outcome`.
 pub fn source_findings(
-    domain: &DomainCrate,
+    domain: &CoreCrate,
     config: AuditConfig,
     outcome: &mut AuditOutcome,
 ) -> Result<()> {
@@ -104,7 +139,7 @@ pub fn source_findings(
 /// downgrades it to a recorded skip — and even then the file is added to
 /// `outcome.skipped` so the clean verdict is withheld.
 fn scan_one_file(
-    domain: &DomainCrate,
+    domain: &CoreCrate,
     src_dir: &Path,
     path: &Path,
     config: AuditConfig,

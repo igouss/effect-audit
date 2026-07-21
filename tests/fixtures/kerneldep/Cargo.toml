@@ -1,0 +1,15 @@
+# Fixture: a kernel crate with a normal dependency. Pure-value or not, a kernel
+# tolerates none — its premise is that it has no dependency graph at all.
+# Deps are never resolved (`cargo metadata --no-deps`), so no lockfile is needed.
+[workspace]
+
+[package]
+name = "kerneldep-contract"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+serde = "1"
+
+[package.metadata.hex-arch]
+role = "kernel"

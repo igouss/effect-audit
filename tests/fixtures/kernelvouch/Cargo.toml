@@ -1,0 +1,16 @@
+# Fixture: a kernel crate trying to vouch for a dependency via `pure-deps`.
+# The allowlist is a domain-crate mechanism; on a kernel it cannot make a
+# dependency acceptable, because no dependency is acceptable.
+[workspace]
+
+[package]
+name = "kernelvouch-contract"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+serde = "1"
+
+[package.metadata.hex-arch]
+role = "kernel"
+pure-deps = ["serde"]

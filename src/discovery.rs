@@ -1,9 +1,15 @@
-//! Imperative shell: ask cargo which crates are tagged `role = "domain"` and
+//! Imperative shell: ask cargo which crates make up the functional core and
 //! where their source lives.
 //!
-//! This deliberately reuses the exact marker `hex-domain-purity.sh` keys on —
-//! `[package.metadata.hex-arch] role = "domain"` — so the effect gate and the
-//! dependency gate always agree on *which* crates are the functional core.
+//! Two roles qualify, and they are not held to the same standard. A
+//! `role = "domain"` crate may vouch for a pure-value dependency through
+//! `pure-deps`; a `role = "kernel"` crate may not vouch for anything, because a
+//! crate whose premise is that it has no dependency graph by construction has
+//! nothing to vouch for. Source scanning is identical for both.
+//!
+//! This deliberately reuses the exact marker the hex-arch dependency gate keys
+//! on — `[package.metadata.hex-arch] role` — so the two gates always agree on
+//! *which* crates are the functional core.
 
 use std::path::Path;
 
@@ -11,12 +17,34 @@ use anyhow::{Context, Result};
 use cargo_metadata::camino::{Utf8Path, Utf8PathBuf};
 use cargo_metadata::{Dependency, DependencyKind, MetadataCommand, Package};
 
-/// A domain crate to audit: its source directory, the raw production-build
+/// Which layer of the core a crate belongs to. Decides how strictly its
+/// manifest is judged, and nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// `role = "kernel"`: tolerates no normal dependency at all.
+    Kernel,
+    /// `role = "domain"`: tolerates dependencies it vouches for via `pure-deps`.
+    Domain,
+}
+
+impl Role {
+    /// The manifest spelling, for reports.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Kernel => "kernel",
+            Self::Domain => "domain",
+        }
+    }
+}
+
+/// A core crate to audit: its role, source directory, the raw production-build
 /// dependency names, and any declared pure-value allowlist. The *policy* (which
-/// deps are findings) lives in [`crate::effect::classify_dependency`]; this
-/// struct carries only the facts read from the manifest.
+/// deps are findings) lives in [`crate::effect`]; this struct carries only the
+/// facts read from the manifest.
 #[derive(Debug)]
-pub struct DomainCrate {
+pub struct CoreCrate {
+    /// Which core layer this crate declares.
+    pub role: Role,
     /// Crate name, for reports.
     pub name: String,
     /// Repo-relative path to the crate's `Cargo.toml`.
@@ -32,7 +60,7 @@ pub struct DomainCrate {
     pub pure_deps: Option<Vec<String>>,
 }
 
-impl DomainCrate {
+impl CoreCrate {
     /// Repo-relative path to the crate's directory, used to build clickable
     /// file locations. Empty string when the crate is the workspace root (the
     /// manifest is a bare `Cargo.toml` with no directory prefix).
@@ -44,13 +72,14 @@ impl DomainCrate {
     }
 }
 
-/// Discover every `role = "domain"` crate in the workspace rooted at `root`.
+/// Discover every core crate (`role = "kernel"` or `role = "domain"`) in the
+/// workspace rooted at `root`.
 ///
 /// `strict` controls manifest dependency reporting: when false, only normal
 /// non-optional deps are considered (the default-feature production build);
 /// when true, optional (feature-gated) deps are flagged too — an `optional`
 /// `reqwest` is still `reqwest` sitting in a domain crate.
-pub fn domain_crates(root: &Path, strict: bool) -> Result<Vec<DomainCrate>> {
+pub fn core_crates(root: &Path, strict: bool) -> Result<Vec<CoreCrate>> {
     let metadata: cargo_metadata::Metadata = MetadataCommand::new()
         .current_dir(root)
         .no_deps()
@@ -58,27 +87,34 @@ pub fn domain_crates(root: &Path, strict: bool) -> Result<Vec<DomainCrate>> {
         .context("cargo metadata failed")?;
 
     let workspace_root: &Utf8Path = metadata.workspace_root.as_path();
-    let mut crates: Vec<DomainCrate> = metadata
+    let mut crates: Vec<CoreCrate> = metadata
         .packages
         .iter()
-        .filter(|pkg: &&Package| is_domain(pkg))
-        .map(|pkg: &Package| to_domain_crate(pkg, workspace_root, strict))
+        .filter_map(|pkg: &Package| {
+            role_of(pkg).map(|role: Role| to_core_crate(pkg, role, workspace_root, strict))
+        })
         .collect();
-    crates.sort_by(|a: &DomainCrate, b: &DomainCrate| a.name.cmp(&b.name));
+    crates.sort_by(|a: &CoreCrate, b: &CoreCrate| a.name.cmp(&b.name));
     Ok(crates)
 }
 
-/// Whether a package declares `[package.metadata.hex-arch] role = "domain"`.
-fn is_domain(pkg: &Package) -> bool {
-    pkg.metadata
+/// The core role a package declares, or `None` when it declares neither of the
+/// two roles this tool audits.
+fn role_of(pkg: &Package) -> Option<Role> {
+    match pkg
+        .metadata
         .get("hex-arch")
         .and_then(|hex: &serde_json::Value| hex.get("role"))
         .and_then(|role: &serde_json::Value| role.as_str())
-        == Some("domain")
+    {
+        Some("kernel") => Some(Role::Kernel),
+        Some("domain") => Some(Role::Domain),
+        _ => None,
+    }
 }
 
-/// Build a [`DomainCrate`] from a metadata package.
-fn to_domain_crate(pkg: &Package, workspace_root: &Utf8Path, strict: bool) -> DomainCrate {
+/// Build a [`CoreCrate`] from a metadata package.
+fn to_core_crate(pkg: &Package, role: Role, workspace_root: &Utf8Path, strict: bool) -> CoreCrate {
     let crate_dir: &Utf8Path = pkg
         .manifest_path
         .parent()
@@ -97,7 +133,8 @@ fn to_domain_crate(pkg: &Package, workspace_root: &Utf8Path, strict: bool) -> Do
         .filter(|dep: &&Dependency| dep.kind == DependencyKind::Normal && (strict || !dep.optional))
         .map(|dep: &Dependency| dep.name.clone())
         .collect();
-    DomainCrate {
+    CoreCrate {
+        role,
         name: pkg.name.clone(),
         manifest_rel,
         src_dir: crate_dir.join("src"),
@@ -128,8 +165,9 @@ fn read_pure_deps(metadata: &serde_json::Value) -> Option<Vec<String>> {
 mod tests {
     use super::*;
 
-    fn crate_with_manifest(manifest_rel: &str) -> DomainCrate {
-        DomainCrate {
+    fn crate_with_manifest(manifest_rel: &str) -> CoreCrate {
+        CoreCrate {
+            role: Role::Domain,
             name: "x".to_owned(),
             manifest_rel: manifest_rel.to_owned(),
             src_dir: Utf8PathBuf::from("/x/src"),

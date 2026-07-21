@@ -37,7 +37,7 @@ pub fn render(findings: &[Finding]) -> String {
     sorted.sort_by(|a: &&Finding, b: &&Finding| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
 
     let mut out: String = String::new();
-    out.push_str("\nFUNCTIONAL-CORE VIOLATION: effects leaked into domain crates.\n\n");
+    out.push_str("\nFUNCTIONAL-CORE VIOLATION: effects leaked into the core.\n\n");
     out.push_str("  Bernhardt's rule: the functional core is pure (values in,\n");
     out.push_str("  values out); all effects live in the imperative shell.\n\n");
 

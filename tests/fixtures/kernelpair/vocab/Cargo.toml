@@ -1,0 +1,10 @@
+[package]
+name = "vocab-contract"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+floor-contract = { path = "../floor" }
+
+[package.metadata.hex-arch]
+role = "kernel"

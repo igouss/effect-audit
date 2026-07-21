@@ -1,0 +1,7 @@
+# Fixture: two kernel crates, one depending on the other. The kernel layer is
+# closed under itself — hex-lint's matrix says a kernel "may depend on nothing
+# but other kernel crates" — so this must be clean, while a third-party
+# dependency on the same crate must not be.
+[workspace]
+members = ["floor", "vocab"]
+resolver = "2"

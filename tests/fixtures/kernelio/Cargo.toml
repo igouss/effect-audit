@@ -1,0 +1,11 @@
+# Fixture: a kernel crate with an effect in its SOURCE rather than its manifest.
+# Source rules are identical to a domain crate's; only the manifest rule differs.
+[workspace]
+
+[package]
+name = "kernelio-contract"
+version = "0.0.0"
+edition = "2021"
+
+[package.metadata.hex-arch]
+role = "kernel"

@@ -14,7 +14,7 @@ use anyhow::{bail, Context, Result};
 
 use effect_audit::audit::{AuditConfig, AuditOutcome};
 use effect_audit::baseline::{self, Ratchet};
-use effect_audit::discovery::{self, DomainCrate};
+use effect_audit::discovery::{self, CoreCrate, Role};
 use effect_audit::finding::Finding;
 use effect_audit::scan::ScanConfig;
 use effect_audit::{audit, report};
@@ -37,6 +37,7 @@ OPTIONS:
     --advisory          Print findings but always exit 0 (warn-only hook).
     --strict            Also flag effectful optional deps, `async` in the core,
                         and HashMap/HashSet use in the core.
+    --require-kernel    Fail (exit 2) if no `role = \"kernel\"` crate is found.
     --require-domain    Fail (exit 2) if no `role = \"domain\"` crate is found,
                         instead of passing green having audited nothing.
     --skip-unparseable  Tolerate a domain file `syn` cannot parse (record it as
@@ -51,7 +52,7 @@ OPTIONS:
 
 EXIT CODES:
     0   clean, or --advisory
-    1   effects leaked into a domain crate (or a stale baseline entry)
+    1   effects leaked into a core crate (or a stale baseline entry)
     2   tool/usage error (bad flag, I/O failure, an unparseable domain file
         without --skip-unparseable, or --require-domain with no domain crate)
 
@@ -72,6 +73,7 @@ struct Args {
     advisory: bool,
     strict: bool,
     require_domain: bool,
+    require_kernel: bool,
     skip_unparseable: bool,
     format: Format,
     baseline: Option<PathBuf>,
@@ -88,15 +90,19 @@ fn main() -> ExitCode {
     }
 }
 
-/// Discover domain crates, audit them, apply the baseline, report, and turn the
+/// Discover core crates, audit them, apply the baseline, report, and turn the
 /// outcome into an exit code.
 fn run() -> Result<ExitCode> {
     let args: Args = parse_args()?;
-    let crates: Vec<DomainCrate> = discovery::domain_crates(&args.root, args.strict)?;
+    let crates: Vec<CoreCrate> = discovery::core_crates(&args.root, args.strict)?;
 
     if crates.is_empty() {
-        return Ok(handle_no_domain_crates(&args));
+        return Ok(handle_no_core_crates(&args));
     }
+    if let Some(missing) = required_role_missing(&args, &crates) {
+        return Ok(missing_required_role(missing));
+    }
+    warn_inert_vouching(&crates);
 
     let config: AuditConfig = AuditConfig {
         scan: ScanConfig {
@@ -127,16 +133,72 @@ fn run() -> Result<ExitCode> {
 }
 
 /// Loud-on-empty: never pass silently green having audited nothing.
-fn handle_no_domain_crates(args: &Args) -> ExitCode {
+fn handle_no_core_crates(args: &Args) -> ExitCode {
     eprintln!(
-        "effect-audit: WARNING — no `role = \"domain\"` crate found; audited nothing.\n  \
-         Check the metadata key `[package.metadata.hex-arch] role = \"domain\"` and the run dir."
+        "effect-audit: WARNING — no `role = \"kernel\"` or `role = \"domain\"` crate found; \
+         audited nothing.\n  \
+         Check the metadata key `[package.metadata.hex-arch] role` and the run dir."
     );
-    if args.require_domain {
-        eprintln!("  --require-domain set: failing.");
+    if args.require_domain || args.require_kernel {
+        eprintln!("  --require-domain/--require-kernel set: failing.");
         return ExitCode::from(EXIT_TOOL_ERROR);
     }
     ExitCode::SUCCESS
+}
+
+/// The role a `--require-*` flag demanded but no crate declares, if any. Both
+/// flags may be set; the kernel is reported first because it is the inner layer.
+fn required_role_missing(args: &Args, crates: &[CoreCrate]) -> Option<Role> {
+    let has = |role: Role| crates.iter().any(|c: &CoreCrate| c.role == role);
+    if args.require_kernel && !has(Role::Kernel) {
+        return Some(Role::Kernel);
+    }
+    if args.require_domain && !has(Role::Domain) {
+        return Some(Role::Domain);
+    }
+    None
+}
+
+/// A role was required but no crate declares it. Distinct from auditing
+/// nothing at all: here the tool did work, just not the work that was demanded.
+fn missing_required_role(role: Role) -> ExitCode {
+    eprintln!(
+        "effect-audit: --require-{0} set, but no `role = \"{0}\"` crate was found.",
+        role.as_str()
+    );
+    ExitCode::from(EXIT_TOOL_ERROR)
+}
+
+/// How many crates of each role were audited, phrased for the verdict line.
+/// Names only the roles actually present, so a domain-only workspace reads
+/// exactly as it did before kernels existed.
+fn census(crates: &[CoreCrate]) -> String {
+    let kernels: usize = crates
+        .iter()
+        .filter(|c: &&CoreCrate| c.role == Role::Kernel)
+        .count();
+    let domains: usize = crates.len() - kernels;
+    match (kernels, domains) {
+        (0, d) => format!("{d} domain crate(s)"),
+        (k, 0) => format!("{k} kernel crate(s)"),
+        (k, d) => format!("{k} kernel + {d} domain crate(s)"),
+    }
+}
+
+/// A `pure-deps` list on a kernel crate cannot make a dependency acceptable,
+/// because no dependency is. Silently ignoring it would let an author believe
+/// they had vouched their way to green.
+fn warn_inert_vouching(crates: &[CoreCrate]) {
+    for c in crates
+        .iter()
+        .filter(|c: &&CoreCrate| c.role == Role::Kernel && c.pure_deps.is_some())
+    {
+        eprintln!(
+            "effect-audit: WARNING — {} declares `pure-deps` but is `role = \"kernel\"`; \
+             a kernel vouches for nothing, so the list is ignored.",
+            c.name
+        );
+    }
 }
 
 /// `--update-baseline`: rewrite the baseline file from the current findings.
@@ -156,7 +218,7 @@ fn update_baseline(args: &Args, outcome: &AuditOutcome) -> Result<ExitCode> {
 }
 
 /// Render the outcome in the requested format.
-fn emit(args: &Args, crates: &[DomainCrate], ratchet: &Ratchet, skipped: &[String]) {
+fn emit(args: &Args, crates: &[CoreCrate], ratchet: &Ratchet, skipped: &[String]) {
     if args.format == Format::Json {
         println!(
             "{}",
@@ -167,16 +229,16 @@ fn emit(args: &Args, crates: &[DomainCrate], ratchet: &Ratchet, skipped: &[Strin
     if ratchet.fresh.is_empty() && ratchet.stale.is_empty() {
         if skipped.is_empty() {
             println!(
-                "effect-audit: {} domain crate(s) clean — functional core holds.",
-                crates.len()
+                "effect-audit: {} clean — functional core holds.",
+                census(crates)
             );
         } else {
             // Honest verdict: we did not read every file, so we will not claim
             // the core holds. The skipped files are named by `warn_skipped`.
             println!(
-                "effect-audit: {} domain crate(s) audited, {} file(s) skipped \
+                "effect-audit: {} audited, {} file(s) skipped \
                  (unparseable, not vouched for).",
-                crates.len(),
+                census(crates),
                 skipped.len()
             );
         }
@@ -186,10 +248,10 @@ fn emit(args: &Args, crates: &[DomainCrate], ratchet: &Ratchet, skipped: &[Strin
     if !ratchet.fresh.is_empty() {
         eprint!("{}", report::render(&ratchet.fresh));
         eprintln!(
-            "\n  {} effect(s) leaked across {} file(s); {} domain crate(s) audited.",
+            "\n  {} effect(s) leaked across {} file(s); {} audited.",
             ratchet.fresh.len(),
             report::distinct_files(&ratchet.fresh),
-            crates.len()
+            census(crates)
         );
     }
     if !ratchet.stale.is_empty() {
@@ -240,6 +302,7 @@ fn parse_args() -> Result<Args> {
     let mut advisory: bool = false;
     let mut strict: bool = false;
     let mut require_domain: bool = false;
+    let mut require_kernel: bool = false;
     let mut skip_unparseable: bool = false;
     let mut format: Format = Format::Human;
     let mut baseline: Option<PathBuf> = None;
@@ -252,6 +315,7 @@ fn parse_args() -> Result<Args> {
             "--advisory" => advisory = true,
             "--strict" => strict = true,
             "--require-domain" => require_domain = true,
+            "--require-kernel" => require_kernel = true,
             "--skip-unparseable" => skip_unparseable = true,
             "--json" => format = Format::Json,
             "--format" => {
@@ -288,6 +352,7 @@ fn parse_args() -> Result<Args> {
         advisory,
         strict,
         require_domain,
+        require_kernel,
         skip_unparseable,
         format,
         baseline,

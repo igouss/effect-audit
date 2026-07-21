@@ -153,6 +153,13 @@ pub fn classify_dependency(name: &str, pure_deps: Option<&[String]>) -> Option<E
     }
 }
 
+/// Name a dependency's effect, falling back to "unvetted" when the taxonomy has
+/// never heard of it. Used where a dependency is a finding regardless of what it
+/// is — the kernel rule — so the only open question is what to call it.
+pub fn unvetted_or_known(name: &str) -> EffectKind {
+    is_effectful_crate(name).unwrap_or(EffectKind::UnvettedDependency)
+}
+
 /// Whether a dependency crate name is a known pure-effect crate.
 ///
 /// This is the **legacy denylist** — the fallback used by a crate that has not

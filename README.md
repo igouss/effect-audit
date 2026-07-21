@@ -1,9 +1,10 @@
 # effect-audit
 
 > Prove that your **functional core** is actually pure. `effect-audit` parses
-> every `role = "domain"` crate in a hex-arch workspace and flags the side
-> effects — clocks, RNG, I/O, console, shared mutable state, runtime/DB deps —
-> that leak into code that's supposed to be values-in, values-out.
+> every `role = "kernel"` and `role = "domain"` crate in a hex-arch workspace
+> and flags the side effects — clocks, RNG, I/O, console, shared mutable state,
+> runtime/DB deps — that leak into code that's supposed to be values-in,
+> values-out.
 
 It enforces Gary Bernhardt's **functional core, imperative shell**: the core (the
 domain) computes; the shell (the adapters / Boundaries) touches the world. The
@@ -12,7 +13,7 @@ dependency-direction checker can't see effects. This does.
 ```
 $ effect-audit tests/fixtures/dirty
 
-FUNCTIONAL-CORE VIOLATION: effects leaked into domain crates.
+FUNCTIONAL-CORE VIOLATION: effects leaked into the core.
 
   Bernhardt's rule: the functional core is pure (values in,
   values out); all effects live in the imperative shell.
@@ -38,6 +39,38 @@ rule.
 
 ---
 
+## Two core roles, two strictnesses
+
+Both `role = "kernel"` and `role = "domain"` crates are audited, and their
+**source** is held to exactly the same effect rules. Their **manifests** are not.
+
+| | may depend on | vouching |
+|---|---|---|
+| `kernel` | other `kernel` crates in the workspace, and nothing else | none available |
+| `domain` | whatever it vouches for via `pure-deps` | `pure-deps` allowlist |
+
+A kernel crate is the floor of the system, and its whole claim is that it has no
+dependency graph by construction — so there is nothing for it to vouch for, and
+`pure-deps` on a kernel crate is inert (the tool says so rather than ignoring it).
+The one exception is another kernel crate, because the kernel layer is closed
+under itself. That is the same line
+[`hex-lint`](https://github.com/igouss/hex-lint)'s role matrix draws; the two
+gates disagreeing about the floor of the system would be a defect in itself.
+
+The verdict line names what it actually audited, so a clean run cannot be read as
+covering more than it did:
+
+```
+effect-audit: 2 kernel + 8 domain crate(s) clean — functional core holds.
+```
+
+`--require-domain` and `--require-kernel` each fail (exit 2) when no crate of
+that role is found, so a misconfigured workspace cannot pass green having
+audited nothing. They mean exactly what they say: a kernel crate does not
+satisfy `--require-domain`.
+
+---
+
 ## The problem it solves
 
 A **dependency-direction checker** — like [`hex-lint`](https://github.com/igouss/hex-lint) —
@@ -51,6 +84,7 @@ let id  = uuid::Uuid::new_v4();           // randomness → nondeterministic
 let cfg = std::fs::read("config")?;       // filesystem → reaches outside
 std::thread::spawn(work);                 // concurrency
 static CACHE: Mutex<Map> = ...;           // shared mutable state
+struct Fake { calls: Mutex<Vec<Call>> }   // ...and so is a field
 thread_local! { static C: RefCell<…> }    // hidden global state
 ```
 
@@ -67,7 +101,7 @@ rule. Run both.
 | Dependency arrows point inward | ✅ | ❌ | 👁️ | — *(out of scope)* |
 | Clock / RNG / I/O *call sites* in the core | ❌ | ❌ | 👁️ | ✅ |
 | Effectful *dependencies* (`tokio`, `sqlx`, `reqwest`) | ❌ | ❌ | 👁️ | ✅ |
-| Shared mutable state (`static Mutex`, `thread_local!`) | ❌ | ❌ | 👁️ | ✅ |
+| Shared mutable state (`static Mutex`, a `Mutex` field, `thread_local!`) | ❌ | ❌ | 👁️ | ✅ |
 | Effects inside *evaluated* macro args (`format!("{}", now())`) | ❌ | ❌ | 👁️ | ✅ |
 | `HashMap`/`HashSet` iteration-order surface in the core (`--strict`) | ❌ | ❌ | 👁️ | ✅ |
 | Allowlist that **compounds** (new effectful crates auto-flagged) | — | ❌ | ❌ | ✅ |
@@ -174,7 +208,7 @@ business policing anyone else.
 | `async-runtime` | a `tokio` / `async-std` dependency or path |
 | `concurrency` | `std::thread::{spawn, scope, sleep}` |
 | `database` | a `sqlx` / `rusqlite` / `redis` / `deadpool-*` dependency or path |
-| `shared-mutable-state` | `static mut`, `static X: Mutex<_>` / `Atomic*` / `OnceCell`, `thread_local!`, `lazy_static!` |
+| `shared-mutable-state` | `static mut`, `static X: Mutex<_>` / `Atomic*` / `OnceCell`, a struct or enum-variant **field** of such a type, `thread_local!`, `lazy_static!` |
 | `hash-iteration` | `HashMap` / `HashSet` in the core's surface — imports, constructors (`HashMap::new`), and type positions (`&HashMap<..>` params, fields, return types), across `std::collections` and `hashbrown` (**`--strict`**; witnesses presence, not a proven order leak) |
 | `unvetted-dependency` | a normal dep not on a crate's `pure-deps` allowlist (allowlist mode only) |
 | `mandated-boxing` | an `async-trait` dependency, a `use async_trait::async_trait`, or an `#[async_trait]` / `#[async_trait::async_trait]` attribute. The macro rewrites every `async fn` in a trait to return `Pin<Box<dyn Future + Send>>`, so the allocation is mandated on every impl and every caller. **A boxed future you spell yourself is not a finding** — for a port held as `Arc<dyn Port>` the box exists either way. The rule targets the mandate, not the allocation |
@@ -505,9 +539,17 @@ for shared state.
 call site by the AST scan.
 
 **Does it flag `&mut self`?** No. Mutating a value you own and return is still
-functional. Only *shared* mutable state — module-level statics, interior
-mutability, `thread_local!` — smuggles in nondeterminism, and that's what's
-flagged.
+functional, and a plain field (`struct Editor { row: usize }`) is just data.
+Only *shared* mutable state — module-level statics, `thread_local!`, and a field
+whose **type** names interior mutability (`Mutex`, `RwLock`, `RefCell`, `Cell`,
+`OnceLock`, `Atomic*`) — smuggles in nondeterminism, and that's what's flagged.
+A field is the shape this usually takes in practice: a recording sink threaded
+through a fake, a memo hung off a struct, a counter shared by clones.
+
+**A `OnceLock` memo is not a recording sink — why the same finding?** Because
+the tool cannot tell them apart, and guessing would be worse than asking. The
+predicate is structural; `fc-allow: <why>` is where the author states which one
+they wrote.
 
 **Is it sound or complete?** Sound, not complete. It errs toward missing a
 violation (an effect in a *non-allowlisted* macro's arguments, an exotic

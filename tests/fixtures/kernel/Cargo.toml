@@ -1,0 +1,11 @@
+# Fixture: a dependency-free kernel crate — the shape the rule exists to
+# protect. Own [workspace] table so the parent effect-audit workspace ignores it.
+[workspace]
+
+[package]
+name = "kernel-contract"
+version = "0.0.0"
+edition = "2021"
+
+[package.metadata.hex-arch]
+role = "kernel"
